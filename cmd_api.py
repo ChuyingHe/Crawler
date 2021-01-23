@@ -5,13 +5,28 @@ import json
 from fake_useragent import UserAgent
 import pandas as pd
 import os
+import collections
 
 class Comment:
 	# time_order:
 	# 	- 按时间排序：type=1&sort=0
 	# 	- 按热度排序：type=1&sort=2
 	# All classes have a function called __init__(), which is always executed when the class is being initiated.
-	content = []   # 评论列表
+	content = []
+	comment_count = 0
+	# to filter out useful information - 68 keys
+	keys = ['rpid', 'oid', 'type', 'mid', 'root', 'parent', 'dialog', 'count', 'rcount', 'state', 'fansgrade', 
+	'attr', 'ctime', 'rpid_str', 'root_str', 'parent_str', 'like', 'action', 'member.mid', 'member.uname', 'member.sex', 
+	'member.sign', 'member.avatar', 'member.rank', 'member.DisplayRank', 'member.level_info.current_level', 
+	'member.level_info.current_min', 'member.level_info.current_exp', 'member.level_info.next_exp', 'member.pendant.pid', 
+	'member.pendant.name', 'member.pendant.image', 'member.pendant.expire', 'member.pendant.image_enhance', 
+	'member.pendant.image_enhance_frame', 'member.nameplate.nid', 'member.nameplate.name', 'member.nameplate.image', 
+	'member.nameplate.image_small', 'member.nameplate.level', 'member.nameplate.condition', 'member.official_verify.type', 
+	'member.official_verify.desc', 'member.vip.vipType', 'member.vip.vipDueDate', 'member.vip.dueRemark', 'member.vip.accessStatus', 
+	'member.vip.vipStatus', 'member.vip.vipStatusWarn', 'member.vip.themeType', 'member.vip.label.path', 'member.vip.label.text', 
+	'member.vip.label.label_theme', 'member.following', 'member.is_followed', 'content.message', 'content.plat', 
+	'content.device', 'content.max_line', 'assist', 'folder.has_folded', 'folder.is_folded', 'folder.rule', 'up_action.like', 
+	'up_action.reply', 'show_follow', 'invisible' ]
 
 
 	def getHTMLText(self, url):
@@ -29,7 +44,23 @@ class Comment:
 			return r.text
 		except:
 			return "Exceptions in getHTMLText()"
-		
+
+	def flattenDict(self, data, sep="."):
+		obj = collections.OrderedDict()
+
+		def recurse(t,parent_key=""):
+			if isinstance(t,list):
+				for i in range(len(t)):
+					recurse(t[i],parent_key + sep + str(i) if parent_key else str(i))
+			elif isinstance(t,dict):
+				for k,v in t.items():
+					recurse(v,parent_key + sep + k if parent_key else k)
+			else:
+				obj[parent_key] = t
+
+		recurse(data)
+		return obj
+
 	# get total comments amount
 	def getVideoInfo(self, bvid):
 		dict = {}
@@ -42,7 +73,7 @@ class Comment:
 		# videoData":{ ...,"upData
 		video_data = re.search('"videoData":{.*?upData', initial_state).group()
 
-		count = int(re.search('[0-9]+', re.search('reply":[0-9]+',video_data).group()).group())	# 21223
+		count = int(re.search('[0-9]+', re.search('reply":[0-9]+',video_data).group()).group())	# 21223 所有的评论，包括sub-comment
 		avid = int(re.search('[0-9]+', re.search('aid":[0-9]+',video_data).group()).group())	# 286054084
 		# title = re.search('[0-9]+', re.search('title":.*,',video_data).group()).group()
 		dict["count"] = count
@@ -56,15 +87,13 @@ class Comment:
 	# https://api.bilibili.com/x/v2/reply?pn=1&type=1&oid=286054084&sort=2
 	# 11394（up主自己的定制评论不算）
 	def getRootComments(self, video_info, time_order):
-
 		#test: root_comment_url = 'https://api.bilibili.com/x/v2/reply?pn=1&type=1&oid=286054084&sort=2'
-		#test: html = getHTMLText(root_comment_url)
 		# All the pages have the "count" attribute which gives us the amount of first-layer-comment
 		root_comment_url = 'https://api.bilibili.com/x/v2/reply?pn={}&type=1&oid=' + str(video_info["avid"]) + '&sort=' + str(time_order)
 		html = self.getHTMLText(root_comment_url.format(0))
 		comment_amount = json.loads(html)['data']['page']['count']
 		page_amount = comment_amount//20 + 1		# root-comment 每一页有20个，计算总页数
-		root_comment_count = 0
+		self.comment_count = 0
 
 		# Iteration: all pages
 		# @TODO: count every root comment
@@ -76,42 +105,44 @@ class Comment:
 
 			# Iteration: all root comments in one page
 			for i in range(page_comment_amount):
-				root_comment_count+=1
-				print('Root comment ' + str(root_comment_count) + '/' + str(video_info['count']), end='')	#@TODO: this is the index of every page!
-				self.content.append({
-					page_json['data']['replies'][i]['rpid'], 
-					page_json['data']['replies'][i]['oid'],
-					page_json['data']['replies'][i]['mid'],
-					page_json['data']['replies'][i]['root'],
-					page_json['data']['replies'][i]['parent'],
-					page_json['data']['replies'][i]['dialog']})
-				# print(page_json['data']['replies'][i])
-				self.getSubComment(video_info, page_json['data']['replies'][i])
+				
+				data = page_json['data']['replies'][i]
+				dict = self.flattenDict(data)				
+				filtered_dict = {key: dict[key] for key in self.keys}
 
-		# return json.loads(html)['data']['page']['count']
+				try:
+					self.content.append(filtered_dict)				# Print - use Filtered DICT
+					self.comment_count+=1
+					print('Comment(root) ' + str(self.comment_count) + '/' + str(video_info['count']) + ' has ' + str(len(filtered_dict)) + ' features')
+				except:
+					return "Exceptions in getRootComments()"
+				
+				self.getSubComment(video_info, data)	# Pass info in order to get nested data - use DATA
+
 
 
 	# get sub comments
 	def getSubComment(self, video_info, root_comment):	# root_comment = page_json['data']['replies'][i]
-
+		# https://api.bilibili.com/x/v2/reply/reply?jsonp=jsonp&pn=1&type=1&oid=286054084&ps=10&root=3902869724
+		print('🎉---------------sub------------')
 		sub_comment_url = 'https://api.bilibili.com/x/v2/reply/reply?jsonp=jsonp&pn={}&type=1&oid='+ str(video_info["avid"]) +'&ps=10&root={}'
 		
 		if root_comment['replies']!= None:
 			# amount of sub-comments for 1 root-comment	/
 			sub_comment_amount = root_comment['rcount']				#【397】
+			print('sub_comment_amount: ' + str(sub_comment_amount))
 			sub_comment_visible = len(root_comment['replies'])		#【3】
+			print('sub_comment_visible: '+ str(sub_comment_visible))
 
 			if sub_comment_visible == sub_comment_amount:	 		# 相等的话不需要进行另一个api的调用了，比如只有3条评论，也显示了三条
 				print(' has <= 3 sub comments')
 				for i in range(sub_comment_visible):
-					self.content.append({
-						root_comment['data']['replies'][i]['rpid'],
-						root_comment['data']['replies'][i]['oid'],
-						root_comment['data']['replies'][i]['mid'],
-						root_comment['data']['replies'][i]['root'],
-						root_comment['data']['replies'][i]['parent'],
-						root_comment['data']['replies'][i]['dialog']
-						})
+					dict = self.flattenDict(root_comment['replies'][i])
+					filtered_dict = {key: dict[key] for key in self.keys}
+
+					self.content.append(filtered_dict)
+					self.comment_count+=1
+					print('Comment(sub<=3) ' + str(self.comment_count) + '/' + str(video_info['count']) + ' has ' + str(len(filtered_dict)) + ' features')
 			else:													# 不相等：实际有的sub-comment比显示的多（其他的被折叠了）
 				print(' has '+ str(sub_comment_amount) + ' sub comments in total, including '+ str(sub_comment_visible)+' visible comments')
 
@@ -126,22 +157,26 @@ class Comment:
 						sub_comment_page_comment_amount = len(sub_comment_page_json['data']['replies'])
 
 						for i in range(sub_comment_page_comment_amount):
-							self.content.append({
-								sub_comment_page_json['data']['replies'][i]['rpid'],
-								sub_comment_page_json['data']['replies'][i]['oid'],
-								sub_comment_page_json['data']['replies'][i]['mid'],
-								sub_comment_page_json['data']['replies'][i]['root'],
-								sub_comment_page_json['data']['replies'][i]['parent'],
-								sub_comment_page_json['data']['replies'][i]['dialog']
-								})
+							dict = self.flattenDict(sub_comment_page_json['data']['replies'][i])
+							filtered_dict = {key: dict[key] for key in self.keys}
+
+							self.content.append(filtered_dict)
+							self.comment_count+=1
+							print('Comment(sub>3) ' + str(self.comment_count) + '/' + str(video_info['count']) + ' has ' + str(len(filtered_dict)) + ' features')
+		print('-------------🎉')
+
+
 
 
 	def writeToCSV(self):
 		dataframe = pd.DataFrame(self.content)
+		print('dataframe size: ' + str(dataframe.info()))
+		print(dataframe.head())	# first 5 rows
 		cwd = os.getcwd()
-		file_name = '/data/data.csv'
-		directory = cwd + file_name
-		dataframe.to_csv(directory,index=False, sep=',', header=False,encoding="utf_8_sig")
+		directory = cwd + '/data/data.csv'
+		dataframe.to_csv(directory, sep='|', encoding="utf_8_sig")
+		directory = cwd + '/data/data.json'
+		dataframe.to_json(directory, orient="records",force_ascii=False)
 
 
 	def run(self, bvid):
